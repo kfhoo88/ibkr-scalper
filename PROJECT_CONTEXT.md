@@ -19,7 +19,7 @@
 - **Profit Taking:** Rolling to lower delta
 
 ## TARGET
-,000/month through scalable options scalping
+20,000/month through scalable options scalping
 
 ## CONTINUATION
 Say: 'Continue SPY/QQQ scalping project'
