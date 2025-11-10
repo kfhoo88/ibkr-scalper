@@ -1,0 +1,16 @@
+2025-11-09 22:36:28,741 - INFO - 🔍 Analyzing SPY (1-minute)...
+2025-11-09 22:36:29,297 - INFO - 📊 SPY Analysis:
+2025-11-09 22:36:29,297 - INFO -    HA Trend: 1
+2025-11-09 22:36:29,297 - INFO -    EMA Trend: -1
+2025-11-09 22:36:29,297 - INFO -    Trend Strength: 0.28
+2025-11-09 22:36:29,297 - INFO -    Volume Ratio: 0.65
+2025-11-09 22:36:29,297 - INFO -    Patterns: Bullish=False, Bearish=False
+2025-11-09 22:36:29,297 - INFO -    No scalping signal (Hold)
+2025-11-09 22:36:29,297 - INFO - 🔍 Analyzing QQQ (1-minute)...
+2025-11-09 22:36:29,844 - INFO - 📊 QQQ Analysis:
+2025-11-09 22:36:29,844 - INFO -    HA Trend: 1
+2025-11-09 22:36:29,844 - INFO -    EMA Trend: -1
+2025-11-09 22:36:29,844 - INFO -    Trend Strength: 0.28
+2025-11-09 22:36:29,844 - INFO -    Volume Ratio: 0.65
+2025-11-09 22:36:29,844 - INFO -    Patterns: Bullish=False, Bearish=False
+2025-11-09 22:36:29,844 - INFO -    No scalping signal (Hold)
