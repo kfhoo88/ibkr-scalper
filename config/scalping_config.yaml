@@ -10,7 +10,7 @@ risk:
   stop_loss_pct: 30
   take_profit_pct: 20 
   hedge_activation_pct: 20
-  max_hold_minutes: 20
+  max_hold_minutes: 5
   
 options:
   enabled: true

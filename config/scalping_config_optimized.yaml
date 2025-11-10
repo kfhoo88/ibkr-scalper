@@ -1,0 +1,25 @@
+# config/scalping_config_optimized.yaml
+backtesting:
+  initial_capital: 10000
+
+trading:
+  max_position_value: 200
+
+options:
+  strike_selection: "1_OTM"
+
+strategy:
+  # Increased periods to reduce over-trading
+  ma_fast_period: 12    # Increased from 9
+  ma_slow_period: 20    # Increased from 14
+  heikin_ashi_smoothing: true
+  # Added filters to reduce trade frequency
+  min_signal_strength: 0.3
+  require_volume_confirmation: true
+
+risk:
+  stop_loss_pct: 25
+  take_profit_pct: 15
+  hedge_activation_pct: 20
+  # Added max trades per day
+  max_daily_trades: 10
