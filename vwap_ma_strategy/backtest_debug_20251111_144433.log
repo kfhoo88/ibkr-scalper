@@ -1,0 +1,3 @@
+2025-11-11 14:44:33,152 - INFO - Logging to file: backtest_debug_20251111_144433.log
+2025-11-11 14:44:33,152 - INFO - Starting backtest for SPY
+2025-11-11 14:44:42,731 - INFO - Loaded 99300 rows for SPY from SPY_IBKR_1min_1year_20251110.csv

@@ -38,12 +38,19 @@ class VWAPMABacktester:
         self.hedge_trigger = self.config['exit_rules']['hedge_trigger'] / 100
         
     def setup_logging(self):
-        """Setup logging configuration"""
+        """Setup logging configuration to file"""
+        log_filename = f"backtest_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        
         logging.basicConfig(
             level=getattr(logging, self.config['logging']['level']),
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_filename),
+                logging.StreamHandler()  # Also print to console
+            ]
         )
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Logging to file: {log_filename}")
     
     def calculate_indicators(self, df):
         """Calculate VWAP, MAs, and other indicators"""
@@ -159,58 +166,35 @@ class VWAPMABacktester:
             return green_candles >= self.config['entry_rules']['pullback_min_candles']
     
     def generate_signal(self, df, current_index, symbol):
-        """Generate trading signal based on VWAP + MA strategy"""
-        if current_index < self.ma_slow:
+        """Better entry signals for scalping"""
+        if current_index < 20:
             return None
-        
+            
         current = df.iloc[current_index]
         prev = df.iloc[current_index - 1]
+        prev_2 = df.iloc[current_index - 2] if current_index >= 2 else prev
         
-        # Check market filters
-        if current['atr_percentage'] < self.config['market_filters']['min_atr_percentage']:
-            return None
+        # Relaxed volume requirement for scalping
+        volume_ok = current['volume'] > 0.8 * df['volume'].tail(20).mean()
         
-        if current['volume_ratio'] < self.config['market_filters']['min_volume_ratio']:
-            return None
+        # STRONGER TREND CONFIRMATION - FIXED LOGIC
+        # Compare current MA with previous MA values (not using shift on floats)
+        strong_uptrend = (current['ma_fast'] > current['ma_slow'] and 
+                         current['ma_fast'] > prev['ma_fast'])  # MA fast is rising
         
-        # Check trading hours
-        if not self.is_trading_hours(current.name):
-            return None
+        strong_downtrend = (current['ma_fast'] < current['ma_slow'] and 
+                           current['ma_fast'] < prev['ma_fast'])  # MA fast is falling
         
-        signal = None
-        
-        # LONG Signal: MA9 > MA21, Price above VWAP, Green candle closes above MA9 after pullback
-        if (current['ma_fast'] > current['ma_slow'] and
-            current['close'] > current['vwap'] and
-            current['close'] > current['ma_fast'] and
-            prev['close'] <= prev['ma_fast'] and
-            self.detect_pullback(df, current_index, "long")):
+        if (current['close'] > current['ma_fast'] and 
+            volume_ok and strong_uptrend):
+            return {'type': 'LONG', 'timestamp': current.name, 'price': current['close']}
             
-            signal = {
-                'type': 'LONG',
-                'timestamp': current.name,
-                'price': current['close'],
-                'symbol': symbol
-                # REMOVED: 'option_price': option_price
-            }
+        elif (current['close'] < current['ma_fast'] and 
+              volume_ok and strong_downtrend):
+            return {'type': 'SHORT', 'timestamp': current.name, 'price': current['close']}
         
-        # SHORT Signal: MA9 < MA21, Price below VWAP, Red candle closes below MA9 after pullback
-        elif (current['ma_fast'] < current['ma_slow'] and
-              current['close'] < current['vwap'] and
-              current['close'] < current['ma_fast'] and
-              prev['close'] >= prev['ma_fast'] and
-              self.detect_pullback(df, current_index, "short")):
-            
-            signal = {
-                'type': 'SHORT',
-                'timestamp': current.name,
-                'price': current['close'],
-                'symbol': symbol
-                # REMOVED: 'option_price': option_price
-            }
+        return None
         
-        return signal
-
     def run_backtest(self, symbol):
         """Run complete backtest for symbol"""
         self.logger.info(f"Starting backtest for {symbol}")
@@ -218,10 +202,10 @@ class VWAPMABacktester:
         # Load and prepare data
         df = self.data_loader.load_symbol_data(symbol)
         if df is None:
-            return None
+            return {'trades': [], 'performance': {}}
             
         if not self.data_loader.validate_data(df, symbol):
-            return None
+            return {'trades': [], 'performance': {}}
             
         df = self.calculate_indicators(df)
         
@@ -263,23 +247,33 @@ class VWAPMABacktester:
                     trades.append(self.close_trade(current_trade, df.iloc[i], exit_reason, symbol))
                     current_trade = None
         
-        # Calculate performance metrics
-        return self.calculate_performance(trades)
+        # Calculate performance metrics and return both
+        performance = self.calculate_performance(trades)
+        return {
+            'trades': trades,
+            'performance': performance
+        }
 
     def check_exit_conditions(self, df, current_index, trade):
-        """Check if trade should be exited based on price moves"""
+        """Check if trade should be exited"""
         current = df.iloc[current_index]
-    
-        # Calculate P&L percentage based on PRICE MOVES
+        
+        # Calculate hold time (in minutes for 1-min bars)
+        hold_time = (current.name - trade['entry_time']).total_seconds() / 60
+        
+        # TIME-BASED EXIT: Scalping - don't hold too long
+        if hold_time > 10:  # 10 minutes max for scalping
+            return 'time_exit'
+        
+        # Existing P&L based exits
         if trade['type'] == 'LONG':
             pnl_pct = (current['close'] - trade['entry_price']) / trade['entry_price']
         else:
             pnl_pct = (trade['entry_price'] - current['close']) / trade['entry_price']
         
-        # Use PRICE-BASED targets (0.15 and 0.08)
-        if pnl_pct >= self.profit_target:  # Should be 0.0015
+        if pnl_pct >= self.profit_target:
             return 'profit_target'
-        if pnl_pct <= -self.stop_loss:     # Should be -0.0008  
+        if pnl_pct <= -self.stop_loss:
             return 'stop_loss'
         
         # Market close exit
@@ -311,48 +305,177 @@ class VWAPMABacktester:
         return trade
 
     def calculate_performance(self, trades):
-        """Calculate backtest performance metrics"""
-        if not trades:
-            return {"error": "No trades executed"}
+        """Calculate performance metrics with options conversion"""
+        # Handle empty or invalid trades
+        if not trades or not isinstance(trades, list):
+            print(f"DEBUG: Invalid trades data - type: {type(trades)}, value: {trades}")
+            return {
+                'total_trades': 0,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'max_win': 0,
+                'max_loss': 0,
+                'profit_factor': 0,
+                'total_options_pnl': 0,
+                'avg_options_pnl': 0,
+                'options_win_rate': 0,
+                'options_profit_factor': 0,
+            }
         
-        df_trades = pd.DataFrame(trades)
+        # Ensure all trades are dictionaries
+        valid_trades = []
+        for trade in trades:
+            if isinstance(trade, dict) and 'pnl' in trade:
+                valid_trades.append(trade)
+            else:
+                print(f"DEBUG: Invalid trade skipped: {trade}")
         
-        metrics = {
-            'total_trades': len(trades),
-            'winning_trades': len(df_trades[df_trades['pnl'] > 0]),
-            'losing_trades': len(df_trades[df_trades['pnl'] < 0]),
-            'total_pnl': df_trades['pnl'].sum(),
-            'avg_pnl': df_trades['pnl'].mean(),
-            'win_rate': len(df_trades[df_trades['pnl'] > 0]) / len(trades) * 100,
-            'largest_win': df_trades['pnl'].max(),
-            'largest_loss': df_trades['pnl'].min(),
-            'profit_factor': abs(df_trades[df_trades['pnl'] > 0]['pnl'].sum() / 
-                               df_trades[df_trades['pnl'] < 0]['pnl'].sum()) if df_trades[df_trades['pnl'] < 0]['pnl'].sum() != 0 else float('inf'),
-            'avg_holding_time': (df_trades['exit_time'] - df_trades['entry_time']).mean().total_seconds() / 60
+        if not valid_trades:
+            return {
+                'total_trades': 0,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'max_win': 0,
+                'max_loss': 0,
+                'profit_factor': 0,
+                'total_options_pnl': 0,
+                'avg_options_pnl': 0,
+                'options_win_rate': 0,
+                'options_profit_factor': 0,
+            }
+        
+        # Use valid_trades for calculations
+        total_pnl = sum(trade['pnl'] for trade in valid_trades)
+        winning_trades = [t for t in valid_trades if t['pnl'] > 0]
+        win_rate = len(winning_trades) / len(valid_trades) * 100
+        
+        # Calculate profit factor
+        gross_profit = sum(trade['pnl'] for trade in valid_trades if trade['pnl'] > 0)
+        gross_loss = abs(sum(trade['pnl'] for trade in valid_trades if trade['pnl'] < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        
+        # Options conversion
+        options_pnls = []
+        for trade in valid_trades:
+            options_result = self.convert_to_options_pnl(trade, trade.get('symbol', 'SPY'))
+            options_pnls.append(options_result['options_pnl_dollar'])
+            trade['options_pnl'] = options_result
+        
+        total_options_pnl = sum(options_pnls)
+        
+        # Calculate options profit factor
+        options_gross_profit = sum(pnl for pnl in options_pnls if pnl > 0)
+        options_gross_loss = abs(sum(pnl for pnl in options_pnls if pnl < 0))
+        options_profit_factor = options_gross_profit / options_gross_loss if options_gross_loss > 0 else 0
+        
+        # Performance metrics
+        return {
+            'total_trades': len(valid_trades),
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'avg_pnl': total_pnl / len(valid_trades),
+            'max_win': max((t['pnl'] for t in valid_trades), default=0),
+            'max_loss': min((t['pnl'] for t in valid_trades), default=0),
+            'profit_factor': profit_factor,
+            'total_options_pnl': total_options_pnl,
+            'avg_options_pnl': total_options_pnl / len(valid_trades),
+            'options_win_rate': len([p for p in options_pnls if p > 0]) / len(options_pnls) * 100,
+            'options_profit_factor': options_profit_factor,
         }
-        
-        return metrics
 
     def run_all_backtests(self):
         """Run backtests for all enabled symbols"""
-        results = {}
+        all_results = {}
         
         for symbol in self.config['symbols']['enabled']:
             print(f"\n{'='*50}")
             print(f"BACKTESTING: {symbol}")
             print(f"{'='*50}")
             
-            result = self.run_backtest(symbol)
-            results[symbol] = result
+            raw_result = self.run_backtest(symbol)
             
-            if result and 'error' not in result:
-                print(f"Total Trades: {result['total_trades']}")
-                print(f"Win Rate: {result['win_rate']:.2f}%")
-                print(f"Total P&L: ${result['total_pnl']:.2f}")
-                print(f"Average P&L: ${result['avg_pnl']:.2f}")
-                print(f"Profit Factor: {result['profit_factor']:.2f}")
-                print(f"Average Holding Time: {result['avg_holding_time']:.1f} minutes")
-            else:
-                print(f"No trades or error: {result}")
+            # Extract trades and performance
+            trades_list = raw_result.get('trades', [])
+            performance = raw_result.get('performance', {})
+            
+            print(f"DEBUG: Found {len(trades_list)} trades")
+            
+            # Add options conversion to the performance metrics
+            if trades_list:
+                options_pnls = []
+                for trade in trades_list:
+                    options_result = self.convert_to_options_pnl(trade, symbol)
+                    options_pnls.append(options_result['options_pnl_dollar'])
+                    trade['options_pnl'] = options_result
+                
+                total_options_pnl = sum(options_pnls)
+                options_gross_profit = sum(pnl for pnl in options_pnls if pnl > 0)
+                options_gross_loss = abs(sum(pnl for pnl in options_pnls if pnl < 0))
+                options_profit_factor = options_gross_profit / options_gross_loss if options_gross_loss > 0 else 0
+                
+                performance['total_options_pnl'] = total_options_pnl
+                performance['avg_options_pnl'] = total_options_pnl / len(trades_list)
+                performance['options_win_rate'] = len([p for p in options_pnls if p > 0]) / len(options_pnls) * 100
+                performance['options_profit_factor'] = options_profit_factor
+            
+            all_results[symbol] = performance
+            
+            # Print results
+            print(f"\n--- SHARES PERFORMANCE ---")
+            print(f"Total Trades: {performance.get('total_trades', 0)}")
+            print(f"Win Rate: {performance.get('win_rate', 0):.2f}%")
+            print(f"Total P&L: ${performance.get('total_pnl', 0):.2f}")
+            print(f"Average P&L: ${performance.get('avg_pnl', 0):.2f}")
+            print(f"Profit Factor: {performance.get('profit_factor', 0):.2f}")
+            
+            # Options results
+            print(f"\n--- OPTIONS CONVERSION ---")
+            print(f"Options Total P&L: ${performance.get('total_options_pnl', 0):.2f}")
+            print(f"Options Avg P&L: ${performance.get('avg_options_pnl', 0):.2f}")
+            print(f"Options Win Rate: {performance.get('options_win_rate', 0):.2f}%")
+            print(f"Options Profit Factor: {performance.get('options_profit_factor', 0):.2f}")
+            
+            # Save trades for analysis
+            self.trades.extend(trades_list)
         
-        return results
+        return all_results
+                    
+               
+    def convert_to_options_pnl(self, share_trade, symbol):
+        """Convert share-based P&L to options equivalent"""
+        OPTIONS_CONVERSION = {
+            'SPY': {
+                'delta_multiplier': 0.4,      # 0.4 delta target
+                'leverage_multiplier': 20,    # Options move ~20x share percentage
+                'theta_decay_per_minute': 0.001
+            },
+            'QQQ': {
+                'delta_multiplier': 0.4,
+                'leverage_multiplier': 25,    # QQQ more volatile
+                'theta_decay_per_minute': 0.0012
+            }
+        }
+        
+        conversion = OPTIONS_CONVERSION.get(symbol, OPTIONS_CONVERSION['SPY'])
+        
+        # Calculate options P&L percentage
+        share_pnl_pct = share_trade['pnl_pct']
+        options_pnl_pct = share_pnl_pct * conversion['leverage_multiplier'] * conversion['delta_multiplier']
+        
+        # Apply theta decay based on hold time
+        if 'hold_minutes' in share_trade:
+            theta_loss = share_trade['hold_minutes'] * conversion['theta_decay_per_minute'] * 100  # Convert to percentage
+            options_pnl_pct -= theta_loss
+        
+        # Assume $200 premium per contract (typical for 1 DTE 0.4 delta)
+        premium = 200
+        options_pnl_dollar = (options_pnl_pct / 100) * premium
+        
+        return {
+            'options_pnl_dollar': options_pnl_dollar,
+            'options_pnl_pct': options_pnl_pct,
+            'premium': premium,
+            'share_pnl_pct': share_pnl_pct
+        }
