@@ -14,6 +14,7 @@ options:
   expiration: 1
   delta_target: 0.40
   max_premium: 200
+  contracts_per_trade: 1     # Realistic: 1 contract per trade
 
 indicators:
   ma_fast: 9
@@ -29,12 +30,13 @@ entry_rules:
   min_volume_ratio: 1.5
 
 exit_rules:
-  profit_target_pct: 0.8      # FIX: 0.8% for shares = ~32% for options (0.4 delta * 20x)
-  stop_loss_pct: 0.4          # FIX: 0.4% for shares = ~16% for options
-  hedge_trigger: 20
+  #profit_target_pct: 0.6      # 0.6% share move = ~30% options (0.4 delta * 25x)
+  #stop_loss_pct: 0.9        # 0.9% share move = ~45% options (wider stop)
+  hedge_trigger: 20         # ADD THIS MISSING KEY
   hedge_cost_ratio: 0.25
   market_close_exit: true
   exit_before_minutes: 60
+  max_hold_bars: 15         # Slightly longer to allow for reversals
 
 position_management:
   max_trades_per_day: 5
@@ -59,6 +61,15 @@ market_filters:
   min_volume_ratio: 1.0
   max_bid_ask_spread: 0.5
   vix_max: 25
+
+reversal_strategy:
+  ema_length: 50
+  ema_backcandles: 14
+  hl_backcandles: 14
+  atr_multiplier: 1.0
+  atr_period: 14
+  tp_multiplier: 1.5
+  require_reversal_candle: true
 
 backtest:
   data_path: "../data/historical/"

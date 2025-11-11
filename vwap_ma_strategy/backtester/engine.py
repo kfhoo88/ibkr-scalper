@@ -1,481 +1,348 @@
-# vwap_ma_strategy/backtester/engine.py
+# First, let's check the current project structure and config
+import os
+import yaml
 import pandas as pd
 import numpy as np
-import yaml
-import logging
-from datetime import datetime, time
-import os
-import sys
-import pytz
+from datetime import datetime
+import matplotlib.pyplot as plt
 
-# Add utils to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+# Check project structure
+print("Project structure:")
+for root, dirs, files in os.walk('.'):
+    for file in files:
+        if any(x in file for x in ['.py', '.yaml', '.csv', '.md']):
+            print(f"  {os.path.join(root, file)}")
 
-from utils.data_loader import DataLoader
-from utils.option_pricing import OptionPricer
+# Load current config
+try:
+    with open('vwap_ma_strategy/config/vwap_ma_config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    print("\nCurrent config structure:")
+    print(yaml.dump(config, default_flow_style=False))
+except FileNotFoundError:
+    print("Config file not found - creating new structure")
+    config = {}
 
-class VWAPMABacktester:
-    def __init__(self, config_path="config/vwap_ma_config.yaml"):
-        self.load_config(config_path)
-        self.setup_logging()
-        self.data_loader = DataLoader(self.config['backtest']['data_path'])
-        self.option_pricer = OptionPricer()
-        self.trades = []
-        
-    def load_config(self, config_path):
-        """Load configuration from YAML file"""
-        full_path = os.path.join(os.path.dirname(__file__), '..', config_path)
-        with open(full_path, 'r') as file:
-            self.config = yaml.safe_load(file)
-        
-        # Set instance variables for easy access
-        self.ma_fast = self.config['indicators']['ma_fast']
-        self.ma_slow = self.config['indicators']['ma_slow']
-        self.profit_target = self.config['exit_rules']['profit_target_pct']  # 0.15
-        self.stop_loss = self.config['exit_rules']['stop_loss_pct']          # 0.08
-        #self.profit_target = self.config['exit_rules']['profit_target'] / 100
-        #self.stop_loss = self.config['exit_rules']['stop_loss'] / 100
-        self.hedge_trigger = self.config['exit_rules']['hedge_trigger'] / 100
-        
-    def setup_logging(self):
-        """Setup logging configuration to file"""
-        log_filename = f"backtest_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        
-        logging.basicConfig(
-            level=getattr(logging, self.config['logging']['level']),
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_filename),
-                logging.StreamHandler()  # Also print to console
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Logging to file: {log_filename}")
+# Add reversal strategy parameters to config
+reversal_config = {
+    'ema_length': 21,
+    'ema_backcandles': 14,
+    'hl_backcandles': 8,
+    'atr_multiplier': 1.0,
+    'atr_period': 14,
+    'tp_multiplier': 1.5,
+    'require_reversal_candle': True
+}
+
+# Update config
+if 'reversal_strategy' not in config:
+    config['reversal_strategy'] = reversal_config
+else:
+    config['reversal_strategy'].update(reversal_config)
+
+print("\nUpdated config structure:")
+print(yaml.dump(config, default_flow_style=False))
+
+# Save updated config
+try:
+    with open('vwap_ma_strategy/config/vwap_ma_config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print("✅ Config file updated successfully!")
+except Exception as e:
+    print(f"⚠️ Could not save config: {e}")
+
+# Now implement the reversal strategy
+class ReversalStrategy:
+    def __init__(self, config):
+        self.config = config['reversal_strategy']
+        self.ema_length = self.config['ema_length']
+        self.ema_backcandles = self.config['ema_backcandles']
+        self.hl_backcandles = self.config['hl_backcandles']
+        self.atr_multiplier = self.config['atr_multiplier']
+        self.atr_period = self.config['atr_period']
+        self.tp_multiplier = self.config['tp_multiplier']
+        self.require_reversal_candle = self.config['require_reversal_candle']
     
-    def calculate_indicators(self, df):
-        """Calculate VWAP, MAs, and other indicators"""
-        # Handle timezone-aware datetime index
-        if hasattr(df.index, 'tz') and df.index.tz is not None:
-            df.index = df.index.tz_convert(None)  # Remove timezone
+    def calculate_ema(self, prices):
+        return prices.ewm(span=self.ema_length, adjust=False).mean()
+    
+    def calculate_atr(self, high, low, close):
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.rolling(self.atr_period).mean()
+    
+    def ema_signal(self, df, current_index):
+        """Determine if price is consistently above/below EMA"""
+        sigup = 2  # Bullish - price above EMA
+        sigdn = 1  # Bearish - price below EMA
         
-        # Ensure we have a proper datetime index
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index, utc=True).tz_convert(None)
-        
-        # VWAP Calculation (resets daily)
-        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-        df['tpv'] = df['typical_price'] * df['volume']
-        
-        # Daily cumulative calculations
-        df['date'] = df.index.date
-        df['daily_tpv'] = df.groupby('date')['tpv'].cumsum()
-        df['daily_volume'] = df.groupby('date')['volume'].cumsum()
-        df['vwap'] = df['daily_tpv'] / df['daily_volume']
-        
-        # Moving Averages
-        df['ma_fast'] = df['close'].rolling(window=self.ma_fast).mean()
-        df['ma_slow'] = df['close'].rolling(window=self.ma_slow).mean()
-        
-        # Volume SMA
-        df['volume_sma'] = df['volume'].rolling(
-            window=self.config['indicators']['volume_period']
-        ).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_sma']
-        
-        # ATR for volatility
-        df['tr'] = np.maximum(
-            df['high'] - df['low'],
-            np.maximum(
-                abs(df['high'] - df['close'].shift(1)),
-                abs(df['low'] - df['close'].shift(1))
-            )
-        )
-        df['atr'] = df['tr'].rolling(window=self.config['indicators']['atr_period']).mean()
-        df['atr_percentage'] = df['atr'] / df['close']
-        
+        start_idx = current_index - self.ema_backcandles
+        if start_idx < 0:
+            return 0
+            
+        # Check last N candles for consistency
+        for i in range(start_idx, current_index + 1):
+            if df['Low'].iloc[i] <= df['EMA'].iloc[i]:
+                sigup = 0  # Not consistently above EMA
+            if df['High'].iloc[i] >= df['EMA'].iloc[i]:
+                sigdn = 0  # Not consistently below EMA
+                
+        if sigup:
+            return sigup
+        elif sigdn:
+            return sigdn
+        else:
+            return 0
+    
+    def calculate_swing_points(self, df):
+        """Calculate rolling highs and lows"""
+        df = df.copy()
+        df['swing_low'] = df['Low'].rolling(window=self.hl_backcandles).min()
+        df['swing_high'] = df['High'].rolling(window=self.hl_backcandles).max()
         return df
     
-    def is_trading_hours(self, timestamp):
-        """Check if current time is within trading hours (EST)"""
-        # Convert to EST timezone
-        est = pytz.timezone('US/Eastern')
-        if timestamp.tzinfo is None:
-            # If naive datetime, assume it's UTC and convert to EST
-            timestamp = pytz.utc.localize(timestamp).astimezone(est)
-        else:
-            # If timezone-aware, convert to EST
-            timestamp = timestamp.astimezone(est)
-        
-        current_time = timestamp.time()
-        
-        morning_start = time.fromisoformat(self.config['trading_hours']['morning_start'])
-        morning_end = time.fromisoformat(self.config['trading_hours']['morning_end'])
-        afternoon_start = time.fromisoformat(self.config['trading_hours']['afternoon_start'])
-        afternoon_end = time.fromisoformat(self.config['trading_hours']['afternoon_end'])
-        
-        # Avoid first minutes
-        market_open = time(9, 30)
-        avoid_first_minutes = self.config['trading_hours']['avoid_first_minutes']
-        if current_time < time(market_open.hour, market_open.minute + avoid_first_minutes):
+    def is_reversal_candle(self, df, current_index, direction):
+        """Check for reversal candle confirmation"""
+        if current_index < 1:
             return False
             
-        # Avoid last minutes
-        market_close = time(16, 0)
-        avoid_last_minutes = self.config['trading_hours']['avoid_last_minutes']
+        current_candle = df.iloc[current_index]
+        prev_candle = df.iloc[current_index - 1]
         
-        cutoff_minute = market_close.minute - avoid_last_minutes
-        if cutoff_minute < 0:
-            cutoff_hour = market_close.hour - 1
-            cutoff_minute = 60 + cutoff_minute
-        else:
-            cutoff_hour = market_close.hour
-        
-        cutoff_time = time(cutoff_hour, cutoff_minute)
-        
-        if current_time > cutoff_time:
-            return False
-        
-        in_morning = morning_start <= current_time <= morning_end
-        in_afternoon = afternoon_start <= current_time <= afternoon_end
-        
-        return in_morning or in_afternoon
+        if direction == 'long':
+            # Green candle that closes higher than previous close
+            return (current_candle['Close'] > current_candle['Open'] and
+                    current_candle['Close'] > prev_candle['Close'])
+        elif direction == 'short':
+            # Red candle that closes lower than previous close
+            return (current_candle['Close'] < current_candle['Open'] and
+                    current_candle['Close'] < prev_candle['Close'])
+        return False
     
-    def detect_pullback(self, df, current_index, direction):
-        """Detect pullback pattern"""
-        if current_index < 2:
-            return False
+    def generate_signals(self, df):
+        """Generate complete trading signals"""
+        df = df.copy()
         
-        if direction == "long":
-            # Look for one or more red candles before potential entry
-            red_candles = 0
-            for i in range(1, min(4, current_index + 1)):
-                if df.iloc[current_index - i]['close'] < df.iloc[current_index - i]['open']:
-                    red_candles += 1
-                else:
-                    break
-            return red_candles >= self.config['entry_rules']['pullback_min_candles']
+        # Calculate indicators
+        df['EMA'] = self.calculate_ema(df['Close'])
+        df['ATR'] = self.calculate_atr(df['High'], df['Low'], df['Close'])
+        df = self.calculate_swing_points(df)
         
-        else:  # short
-            # Look for one or more green candles before potential entry
-            green_candles = 0
-            for i in range(1, min(4, current_index + 1)):
-                if df.iloc[current_index - i]['close'] > df.iloc[current_index - i]['open']:
-                    green_candles += 1
-                else:
-                    break
-            return green_candles >= self.config['entry_rules']['pullback_min_candles']
-    
-    def generate_signal(self, df, current_index, symbol):
-        """Better entry signals for scalping"""
-        if current_index < 20:
-            return None
+        # Initialize signals
+        df['EMASignal'] = 0
+        df['HLSignal'] = 0
+        df['FinalSignal'] = 0
+        df['SL'] = 0.0
+        df['TP'] = 0.0
+        
+        # Generate signals
+        for i in range(self.ema_backcandles, len(df)):
+            # EMA trend signal
+            ema_sig = self.ema_signal(df, i)
+            df.loc[df.index[i], 'EMASignal'] = ema_sig
             
-        current = df.iloc[current_index]
-        prev = df.iloc[current_index - 1]
-        prev_2 = df.iloc[current_index - 2] if current_index >= 2 else prev
-        
-        # Relaxed volume requirement for scalping
-        volume_ok = current['volume'] > 0.8 * df['volume'].tail(20).mean()
-        
-        # STRONGER TREND CONFIRMATION - FIXED LOGIC
-        # Compare current MA with previous MA values (not using shift on floats)
-        strong_uptrend = (current['ma_fast'] > current['ma_slow'] and 
-                         current['ma_fast'] > prev['ma_fast'])  # MA fast is rising
-        
-        strong_downtrend = (current['ma_fast'] < current['ma_slow'] and 
-                           current['ma_fast'] < prev['ma_fast'])  # MA fast is falling
-        
-        if (current['close'] > current['ma_fast'] and 
-            volume_ok and strong_uptrend):
-            return {'type': 'LONG', 'timestamp': current.name, 'price': current['close']}
-            
-        elif (current['close'] < current['ma_fast'] and 
-              volume_ok and strong_downtrend):
-            return {'type': 'SHORT', 'timestamp': current.name, 'price': current['close']}
-        
-        return None
-        
-    def run_backtest(self, symbol):
-        """Run complete backtest for symbol"""
-        self.logger.info(f"Starting backtest for {symbol}")
-        
-        # Load and prepare data
-        df = self.data_loader.load_symbol_data(symbol)
-        if df is None:
-            return {'trades': [], 'performance': {}}
-            
-        if not self.data_loader.validate_data(df, symbol):
-            return {'trades': [], 'performance': {}}
-            
-        df = self.calculate_indicators(df)
-        
-        # Initialize tracking variables
-        trades = []
-        current_trade = None
-        daily_trades = 0
-        current_date = None
-        
-        for i in range(len(df)):
-            current_time = df.index[i]
-            
-            # Reset daily trade count
-            if current_date != current_time.date():
-                current_date = current_time.date()
-                daily_trades = 0
-            
-            # Check if we can take new trades
-            if (current_trade is None and 
-                daily_trades < self.config['position_management']['max_trades_per_day']):
-                
-                signal = self.generate_signal(df, i, symbol)
-                if signal:
-                    # Enter trade - SIMPLIFIED FOR DIRECT PRICE TRADING
-                    current_trade = {
-                        'entry_time': signal['timestamp'],
-                        'entry_price': signal['price'],
-                        'type': signal['type'],
-                        'symbol': symbol,
-                        'shares': 100  # Trade 100 shares directly instead of options
-                    }
-                    daily_trades += 1
-                    self.logger.info(f"Entered {signal['type']} trade for {symbol} at {signal['timestamp']}")
-            
-            # Manage existing trade
-            if current_trade:
-                exit_reason = self.check_exit_conditions(df, i, current_trade)
-                if exit_reason:
-                    trades.append(self.close_trade(current_trade, df.iloc[i], exit_reason, symbol))
-                    current_trade = None
-        
-        # Calculate performance metrics and return both
-        performance = self.calculate_performance(trades)
-        return {
-            'trades': trades,
-            'performance': performance
-        }
-
-    def check_exit_conditions(self, df, current_index, trade):
-        """Check if trade should be exited"""
-        current = df.iloc[current_index]
-        
-        # Calculate hold time (in minutes for 1-min bars)
-        hold_time = (current.name - trade['entry_time']).total_seconds() / 60
-        
-        # TIME-BASED EXIT: Scalping - don't hold too long
-        if hold_time > 10:  # 10 minutes max for scalping
-            return 'time_exit'
-        
-        # Existing P&L based exits
-        if trade['type'] == 'LONG':
-            pnl_pct = (current['close'] - trade['entry_price']) / trade['entry_price']
-        else:
-            pnl_pct = (trade['entry_price'] - current['close']) / trade['entry_price']
-        
-        if pnl_pct >= self.profit_target:
-            return 'profit_target'
-        if pnl_pct <= -self.stop_loss:
-            return 'stop_loss'
-        
-        # Market close exit
-        current_time = current.name.time()
-        exit_time = time.fromisoformat(self.config['trading_hours']['afternoon_end'])
-        if current_time >= exit_time:
-            return 'market_close'
-        
-        return None
-
-    def close_trade(self, trade, exit_data, exit_reason, symbol):
-        trade['exit_time'] = exit_data.name
-        trade['exit_price'] = exit_data['close']
-        trade['exit_reason'] = exit_reason
-        
-        # Calculate P&L based on price moves
-        if trade['type'] == 'LONG':
-            trade['pnl'] = (trade['exit_price'] - trade['entry_price']) * trade.get('shares', 1)
-        else:
-            trade['pnl'] = (trade['entry_price'] - trade['exit_price']) * trade.get('shares', 1)
-        
-        # Apply commission (simplified)
-        trade['pnl'] -= self.config['backtest']['commission_per_trade']
-        
-        trade['pnl_pct'] = (trade['pnl'] / (trade['entry_price'] * trade.get('shares', 1))) * 100
-        
-        self.logger.info(f"Closed {trade['type']} trade: {exit_reason}, P&L: ${trade['pnl']:.2f}")
-        
-        return trade
-
-    def calculate_performance(self, trades):
-        """Calculate performance metrics with options conversion"""
-        # Handle empty or invalid trades
-        if not trades or not isinstance(trades, list):
-            print(f"DEBUG: Invalid trades data - type: {type(trades)}, value: {trades}")
-            return {
-                'total_trades': 0,
-                'win_rate': 0,
-                'total_pnl': 0,
-                'avg_pnl': 0,
-                'max_win': 0,
-                'max_loss': 0,
-                'profit_factor': 0,
-                'total_options_pnl': 0,
-                'avg_options_pnl': 0,
-                'options_win_rate': 0,
-                'options_profit_factor': 0,
-            }
-        
-        # Ensure all trades are dictionaries
-        valid_trades = []
-        for trade in trades:
-            if isinstance(trade, dict) and 'pnl' in trade:
-                valid_trades.append(trade)
-            else:
-                print(f"DEBUG: Invalid trade skipped: {trade}")
-        
-        if not valid_trades:
-            return {
-                'total_trades': 0,
-                'win_rate': 0,
-                'total_pnl': 0,
-                'avg_pnl': 0,
-                'max_win': 0,
-                'max_loss': 0,
-                'profit_factor': 0,
-                'total_options_pnl': 0,
-                'avg_options_pnl': 0,
-                'options_win_rate': 0,
-                'options_profit_factor': 0,
-            }
-        
-        # Use valid_trades for calculations
-        total_pnl = sum(trade['pnl'] for trade in valid_trades)
-        winning_trades = [t for t in valid_trades if t['pnl'] > 0]
-        win_rate = len(winning_trades) / len(valid_trades) * 100
-        
-        # Calculate profit factor
-        gross_profit = sum(trade['pnl'] for trade in valid_trades if trade['pnl'] > 0)
-        gross_loss = abs(sum(trade['pnl'] for trade in valid_trades if trade['pnl'] < 0))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
-        
-        # Options conversion
-        options_pnls = []
-        for trade in valid_trades:
-            options_result = self.convert_to_options_pnl(trade, trade.get('symbol', 'SPY'))
-            options_pnls.append(options_result['options_pnl_dollar'])
-            trade['options_pnl'] = options_result
-        
-        total_options_pnl = sum(options_pnls)
-        
-        # Calculate options profit factor
-        options_gross_profit = sum(pnl for pnl in options_pnls if pnl > 0)
-        options_gross_loss = abs(sum(pnl for pnl in options_pnls if pnl < 0))
-        options_profit_factor = options_gross_profit / options_gross_loss if options_gross_loss > 0 else 0
-        
-        # Performance metrics
-        return {
-            'total_trades': len(valid_trades),
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'avg_pnl': total_pnl / len(valid_trades),
-            'max_win': max((t['pnl'] for t in valid_trades), default=0),
-            'max_loss': min((t['pnl'] for t in valid_trades), default=0),
-            'profit_factor': profit_factor,
-            'total_options_pnl': total_options_pnl,
-            'avg_options_pnl': total_options_pnl / len(valid_trades),
-            'options_win_rate': len([p for p in options_pnls if p > 0]) / len(options_pnls) * 100,
-            'options_profit_factor': options_profit_factor,
-        }
-
-    def run_all_backtests(self):
-        """Run backtests for all enabled symbols"""
-        all_results = {}
-        
-        for symbol in self.config['symbols']['enabled']:
-            print(f"\n{'='*50}")
-            print(f"BACKTESTING: {symbol}")
-            print(f"{'='*50}")
-            
-            raw_result = self.run_backtest(symbol)
-            
-            # Extract trades and performance
-            trades_list = raw_result.get('trades', [])
-            performance = raw_result.get('performance', {})
-            
-            print(f"DEBUG: Found {len(trades_list)} trades")
-            
-            # Add options conversion to the performance metrics
-            if trades_list:
-                options_pnls = []
-                for trade in trades_list:
-                    options_result = self.convert_to_options_pnl(trade, symbol)
-                    options_pnls.append(options_result['options_pnl_dollar'])
-                    trade['options_pnl'] = options_result
-                
-                total_options_pnl = sum(options_pnls)
-                options_gross_profit = sum(pnl for pnl in options_pnls if pnl > 0)
-                options_gross_loss = abs(sum(pnl for pnl in options_pnls if pnl < 0))
-                options_profit_factor = options_gross_profit / options_gross_loss if options_gross_loss > 0 else 0
-                
-                performance['total_options_pnl'] = total_options_pnl
-                performance['avg_options_pnl'] = total_options_pnl / len(trades_list)
-                performance['options_win_rate'] = len([p for p in options_pnls if p > 0]) / len(options_pnls) * 100
-                performance['options_profit_factor'] = options_profit_factor
-            
-            all_results[symbol] = performance
-            
-            # Print results
-            print(f"\n--- SHARES PERFORMANCE ---")
-            print(f"Total Trades: {performance.get('total_trades', 0)}")
-            print(f"Win Rate: {performance.get('win_rate', 0):.2f}%")
-            print(f"Total P&L: ${performance.get('total_pnl', 0):.2f}")
-            print(f"Average P&L: ${performance.get('avg_pnl', 0):.2f}")
-            print(f"Profit Factor: {performance.get('profit_factor', 0):.2f}")
-            
-            # Options results
-            print(f"\n--- OPTIONS CONVERSION ---")
-            print(f"Options Total P&L: ${performance.get('total_options_pnl', 0):.2f}")
-            print(f"Options Avg P&L: ${performance.get('avg_options_pnl', 0):.2f}")
-            print(f"Options Win Rate: {performance.get('options_win_rate', 0):.2f}%")
-            print(f"Options Profit Factor: {performance.get('options_profit_factor', 0):.2f}")
-            
-            # Save trades for analysis
-            self.trades.extend(trades_list)
-        
-        return all_results
+            # Entry signal based on swing points
+            if ema_sig == 2 and df['Low'].iloc[i] <= df['swing_low'].iloc[i]:
+                # Long setup: in uptrend, price at swing low
+                if not self.require_reversal_candle or self.is_reversal_candle(df, i, 'long'):
+                    df.loc[df.index[i], 'HLSignal'] = 2
+                    df.loc[df.index[i], 'FinalSignal'] = 2  # Buy signal
+                    # Calculate SL and TP
+                    atr_val = df['ATR'].iloc[i]
+                    entry_price = df['Close'].iloc[i]
+                    df.loc[df.index[i], 'SL'] = entry_price - (atr_val * self.atr_multiplier)
+                    df.loc[df.index[i], 'TP'] = entry_price + (atr_val * self.atr_multiplier * self.tp_multiplier)
                     
-               
-    def convert_to_options_pnl(self, share_trade, symbol):
-        """Convert share-based P&L to options equivalent"""
-        OPTIONS_CONVERSION = {
-            'SPY': {
-                'delta_multiplier': 0.4,      # 0.4 delta target
-                'leverage_multiplier': 20,    # Options move ~20x share percentage
-                'theta_decay_per_minute': 0.001
-            },
-            'QQQ': {
-                'delta_multiplier': 0.4,
-                'leverage_multiplier': 25,    # QQQ more volatile
-                'theta_decay_per_minute': 0.0012
-            }
-        }
+            elif ema_sig == 1 and df['High'].iloc[i] >= df['swing_high'].iloc[i]:
+                # Short setup: in downtrend, price at swing high
+                if not self.require_reversal_candle or self.is_reversal_candle(df, i, 'short'):
+                    df.loc[df.index[i], 'HLSignal'] = 1
+                    df.loc[df.index[i], 'FinalSignal'] = 1  # Sell signal
+                    # Calculate SL and TP
+                    atr_val = df['ATR'].iloc[i]
+                    entry_price = df['Close'].iloc[i]
+                    df.loc[df.index[i], 'SL'] = entry_price + (atr_val * self.atr_multiplier)
+                    df.loc[df.index[i], 'TP'] = entry_price - (atr_val * self.atr_multiplier * self.tp_multiplier)
         
-        conversion = OPTIONS_CONVERSION.get(symbol, OPTIONS_CONVERSION['SPY'])
+        return df
+
+# Load historical data for testing
+def load_historical_data(symbol):
+    filename = f"data/historical/{symbol}_IBKR_1min_1year_20251110.csv"
+    try:
+        df = pd.read_csv(filename)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df = df.set_index('datetime')
+        print(f"✅ Loaded {symbol}: {len(df)} rows, {df.index.min()} to {df.index.max()}")
+        return df
+    except FileNotFoundError:
+        print(f"❌ File not found: {filename}")
+        return None
+
+# Test with sample data first
+print("\n🔧 Testing strategy implementation...")
+
+# Create sample data for quick test
+def create_test_data():
+    dates = pd.date_range('2024-01-01', periods=100, freq='1min')
+    np.random.seed(42)
+    price = 450 + np.cumsum(np.random.normal(0, 0.1, 100))
+    
+    test_df = pd.DataFrame({
+        'Open': price + np.random.normal(0, 0.05, 100),
+        'High': price + np.random.normal(0.1, 0.05, 100),
+        'Low': price + np.random.normal(-0.1, 0.05, 100),
+        'Close': price,
+        'Volume': np.random.randint(1000000, 5000000, 100)
+    }, index=dates)
+    
+    return test_df
+
+# Quick test
+test_data = create_test_data()
+strategy = ReversalStrategy(config)
+test_results = strategy.generate_signals(test_data)
+
+print(f"✅ Strategy test completed:")
+print(f"   Signals generated: {len(test_results[test_results['FinalSignal'] != 0])}")
+print(f"   Buy signals: {len(test_results[test_results['FinalSignal'] == 2])}")
+print(f"   Sell signals: {len(test_results[test_results['FinalSignal'] == 1])}")
+
+# Now let's create the backtesting engine
+class ReversalBacktester:
+    def __init__(self, config, initial_capital=10000):
+        self.config = config
+        self.strategy = ReversalStrategy(config)
+        self.initial_capital = initial_capital
         
-        # Calculate options P&L percentage
-        share_pnl_pct = share_trade['pnl_pct']
-        options_pnl_pct = share_pnl_pct * conversion['leverage_multiplier'] * conversion['delta_multiplier']
+    def backtest(self, df, symbol='SPY'):
+        print(f"\n📊 BACKTESTING {symbol} WITH REVERSAL STRATEGY")
         
-        # Apply theta decay based on hold time
-        if 'hold_minutes' in share_trade:
-            theta_loss = share_trade['hold_minutes'] * conversion['theta_decay_per_minute'] * 100  # Convert to percentage
-            options_pnl_pct -= theta_loss
+        # Generate signals
+        df = self.strategy.generate_signals(df)
         
-        # Assume $200 premium per contract (typical for 1 DTE 0.4 delta)
-        premium = 200
-        options_pnl_dollar = (options_pnl_pct / 100) * premium
+        # Trading simulation
+        capital = self.initial_capital
+        position = 0
+        entry_price = 0
+        trades = []
+        equity_curve = []
         
-        return {
-            'options_pnl_dollar': options_pnl_dollar,
-            'options_pnl_pct': options_pnl_pct,
-            'premium': premium,
-            'share_pnl_pct': share_pnl_pct
-        }
+        for i, (idx, row) in enumerate(df.iterrows()):
+            current_price = row['Close']
+            
+            # Calculate current equity
+            if position != 0:
+                unrealized_pnl = (current_price - entry_price) * position
+                current_equity = capital + unrealized_pnl
+            else:
+                current_equity = capital
+                
+            equity_curve.append(current_equity)
+            
+            # Check exit conditions
+            if position > 0:  # Long position
+                if current_price <= row['SL'] or current_price >= row['TP']:
+                    pnl = (current_price - entry_price) * position
+                    capital += pnl
+                    trades.append({
+                        'symbol': symbol,
+                        'entry_time': entry_time,
+                        'exit_time': idx,
+                        'entry_price': entry_price,
+                        'exit_price': current_price,
+                        'position': position,
+                        'pnl': pnl,
+                        'type': 'LONG',
+                        'duration': (idx - entry_time).total_seconds() / 60
+                    })
+                    position = 0
+                    
+            elif position < 0:  # Short position
+                if current_price >= row['SL'] or current_price <= row['TP']:
+                    pnl = (entry_price - current_price) * abs(position)
+                    capital += pnl
+                    trades.append({
+                        'symbol': symbol,
+                        'entry_time': entry_time,
+                        'exit_time': idx,
+                        'entry_price': entry_price,
+                        'exit_price': current_price,
+                        'position': position,
+                        'pnl': pnl,
+                        'type': 'SHORT', 
+                        'duration': (idx - entry_time).total_seconds() / 60
+                    })
+                    position = 0
+            
+            # Enter new positions
+            if position == 0 and row['FinalSignal'] != 0:
+                # Simple position sizing - 100 shares per trade
+                position_size = 100
+                entry_price = current_price
+                entry_time = idx
+                
+                if row['FinalSignal'] == 2:  # Buy
+                    position = position_size
+                elif row['FinalSignal'] == 1:  # Sell
+                    position = -position_size
+        
+        # Analyze results
+        if trades:
+            trades_df = pd.DataFrame(trades)
+            total_pnl = trades_df['pnl'].sum()
+            win_rate = (trades_df['pnl'] > 0).mean() * 100
+            avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean()
+            avg_loss = trades_df[trades_df['pnl'] < 0]['pnl'].mean()
+            profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
+            
+            print(f"📈 {symbol} RESULTS:")
+            print(f"   Total Trades: {len(trades_df)}")
+            print(f"   Win Rate: {win_rate:.2f}%")
+            print(f"   Total P&L: ${total_pnl:.2f}")
+            print(f"   Average Win: ${avg_win:.2f}")
+            print(f"   Average Loss: ${avg_loss:.2f}")
+            print(f"   Profit Factor: {profit_factor:.2f}")
+            print(f"   Final Capital: ${capital:.2f}")
+            
+            return trades_df, equity_curve, df
+        else:
+            print(f"   No trades executed for {symbol}")
+            return pd.DataFrame(), equity_curve, df
+
+# Ready to run on actual data
+print("\n🎯 READY FOR BACKTESTING")
+print("Strategy Parameters:")
+print(f"  EMA Length: {config['reversal_strategy']['ema_length']}")
+print(f"  EMA Backcandles: {config['reversal_strategy']['ema_backcandles']}")
+print(f"  HL Backcandles: {config['reversal_strategy']['hl_backcandles']}")
+print(f"  ATR Multiplier: {config['reversal_strategy']['atr_multiplier']}")
+print(f"  TP Multiplier: {config['reversal_strategy']['tp_multiplier']}")
+print(f"  Require Reversal Candle: {config['reversal_strategy']['require_reversal_candle']}")
+
+# Load and test with actual data
+print("\n📁 LOADING HISTORICAL DATA...")
+spy_data = load_historical_data('SPY')
+qqq_data = load_historical_data('QQQ')
+
+backtester = ReversalBacktester(config)
+
+if spy_data is not None:
+    spy_trades, spy_equity, spy_signals = backtester.backtest(spy_data, 'SPY')
+
+if qqq_data is not None:
+    qqq_trades, qqq_equity, qqq_signals = backtester.backtest(qqq_data, 'QQQ')
+
+# Compare performance
+if spy_data is not None and qqq_data is not None:
+    if len(spy_trades) > 0 and len(qqq_trades) > 0:
+        print(f"\n📊 STRATEGY COMPARISON")
+        print(f"SPY Win Rate: {(spy_trades['pnl'] > 0).mean()*100:.2f}%")
+        print(f"QQQ Win Rate: {(qqq_trades['pnl'] > 0).mean()*100:.2f}%")
+        print(f"SPY Total P&L: ${spy_trades['pnl'].sum():.2f}")
+        print(f"QQQ Total P&L: ${qqq_trades['pnl'].sum():.2f}")
+
+print("\n✅ IMPLEMENTATION COMPLETE!")
+print("Next: Analyze results and fine-tune parameters in config file")
