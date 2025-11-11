@@ -1,7 +1,7 @@
 # PROJECT CONTEXT - SPY/QQQ 0DTE Options Scalping
 
 ## 🎯 CURRENT FOCUS: VWAP + MA Simple Scalping System
-**Last Updated**: [Current Date]
+**Last Updated**: 11 nov 2025
 **Status**: ACTIVE DEVELOPMENT - Phase 1 Backtesting
 
 ## STRATEGY DECISION
