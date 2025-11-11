@@ -4,86 +4,81 @@
 $20k/month profit trading SPY/QQQ OPTIONS only
 
 ## 🔄 CURRENT TESTING APPROACH
-- Testing entry signals on SHARES data (SPY/QQQ) 
-- Converting to OPTIONS execution with realistic parameters
+- Testing entry signals on SHARES data (SPY/QQQ) with options conversion
 - Using 1-year historical 1-minute data for backtesting
+- Focus: Achieve >60% win rate on shares first, then scale to options
 
-## ⚡ REAL TRADING PARAMETERS (Validated by Real Experience)
-- **Instrument**: 1 DTE options
-- **Delta**: ~0.4
-- **Position Size**: 1 contract, $200 premium target
-- **Profit Targets**: 20% ($40 per trade)
-- **Stop Loss**: 30% ($60 per trade) - avoids premature exits
-- **Hold Time**: <10 minutes (true scalping)
-- **Commission**: $1.00 per trade
+## ⚡ CURRENT STRATEGY VERSION
+**Breakout Strategy with Dynamic Support/Resistance**
+- **Entry:** Break above/below 5-period high/low with MA trend confirmation
+- **Filters:** Candle color alignment, MA distance limit (<$0.20), volume confirmation
+- **SL:** Previous candle extreme (testing)
+- **TP:** 1.5× ATR target
 
-## ✅ CURRENT ACHIEVEMENTS
-- **Fixed P&L calculation bugs** that showed impossible losses
-- **Increased trade frequency** from 8 to 1,000+ trades
-- **Achieved profitability** in both shares and options
-- **Implemented realistic options conversion** with proper scaling
-- **Added time-based exits** for true scalping behavior
-
-## 📊 LATEST RESULTS (Pre-Options Scaling)
+## 📊 LATEST RESULTS (Pre-Breakout Strategy)
 SHARES PERFORMANCE:
 
-SPY: 1,050 trades, 19.5% win rate, +$4,451.50 total
+SPY: 447 trades, 32.7% win rate, +$920.45 total
 
-QQQ: 1,003 trades, 26.4% win rate, +$3,514.05 total
+QQQ: 380 trades, 30.3% win rate, -$2,099.00 total
 
-Total Portfolio: +$7,965.55
+Total Portfolio: -$1,178.55
 
-OPTIONS CONVERSION (Current Scaling):
+OPTIONS CONVERSION (BROKEN):
 
-SPY: +$128.84 total, +$0.12 per trade
+SPY: -$12,945 total (-$28.96/trade)
 
-QQQ: +$148.86 total, +$0.15 per trade
+QQQ: -$21,235 total (-$55.88/trade)
 
-Total Options: +$277.70
+
+## ✅ RECENT ACHIEVEMENTS
+- **Fixed P&L calculation** (was showing impossible losses)
+- **Improved win rate** from 0% to 32% with strategic filters
+- **Identified critical issues** with stop loss consistency
+- **Added comprehensive debug logging** for trade analysis
+- **Discovered promising alternative strategies** in sample code
 
 ## 🔧 CURRENT DEVELOPMENT FOCUS
-**Testing Realistic Options Scaling:**
-- Scaling from $0.12/trade to $40/trade targets
-- Implementing proper 30% stop loss (not too tight)
-- Adding realistic commissions and theta decay
-- Validating if strategy edge holds at realistic size
+**Testing Breakout Strategy Implementation:**
+- Dynamic 5-period support/resistance levels
+- Breakout entries instead of MA crossovers
+- Maintaining proven filters (candle color, MA distance, volume)
+
+## 🐛 CRITICAL ISSUES IDENTIFIED
+1. **Stop Loss Inconsistency** - Previous candle SL causes wild variations ($0.65 to $98.65)
+2. **QQQ Underperformance** - Same strategy works on SPY but fails on QQQ
+3. **Options Conversion Broken** - Losing 28x more than shares (math error)
+4. **Timezone Display Issues** - Local time conversion makes trades appear outside hours
 
 ## 📁 CRITICAL WORKING FILES
-- `vwap_ma_strategy/backtester/engine.py` - **MAIN TRADING ENGINE**
-- `vwap_ma_strategy/config/vwap_ma_config.yaml` - **PARAMETERS**
-- `vwap_ma_strategy/main_clean.py` - **TEST RUNNER**
-- `PROJECT_STATUS.md` - **THIS FILE (CONTEXT ANCHOR)**
-
-## 🐛 RECENTLY FIXED ISSUES
-1. **P&L Calculation** - Was showing -$100+ losses due to trading 1 share instead of 100
-2. **Trade Frequency** - Increased from 8 to 1,000+ trades by relaxing filters
-3. **MA Comparison Logic** - Fixed `shift()` error in trend detection
-4. **Hold Time** - Reduced from 67+ minutes to <10 minutes for true scalping
+- `vwap_ma_strategy/backtester/engine.py` - MAIN TRADING ENGINE
+- `vwap_ma_strategy/config/vwap_ma_config.yaml` - PARAMETERS
+- `vwap_ma_strategy/main_clean.py` - TEST RUNNER
+- `sample/Easy_AlgoTrading_Strategy.ipynb` - REFERENCE STRATEGIES
 
 ## 🚀 IMMEDIATE NEXT STEPS
-1. **Test realistic options scaling** (current → $40/trade targets)
-2. **Validate if profitability holds** with proper position sizing
-3. **Analyze win rate improvement** with wider stops (30% vs 10%)
-4. **Check commission impact** on overall profitability
+1. **Test breakout strategy** (just implemented)
+2. **If win rate improves**, implement ATR-based SL/TP from sample strategy
+3. **Analyze QQQ vs SPY differences** for strategy optimization
+4. **Fix options conversion math** once base strategy is solid
 
 ## 💡 KEY INSIGHTS & LEARNING
-- **Strategy has positive expectancy** (profit factor > 1.0)
-- **Low win rate (19-26%) but profitable** due to good risk management
-- **High-frequency scalping works** but needs proper position sizing
-- **Options require significant scaling** from share-based testing
-- **Time-based exits crucial** for scalping discipline
+- **Candle color alignment** crucial for entry quality
+- **MA distance filters** prevent overextended entries
+- **Breakout strategies** often outperform reversal strategies
+- **Consistent risk management** more important than entry timing
 
-## ⚠️ RISKS & CONSIDERATIONS
-- **Low win rate** may not be psychologically sustainable
-- **Scaling impact** unknown - may affect strategy edge
-- **Slippage and fills** not fully modeled for options
-- **Market regime changes** may affect MA crossover effectiveness
+## ⚠️ RECENTLY FIXED BUGS
+- **Column name case sensitivity** ('high' vs 'High')
+- **Market hours timezone issues** causing immediate exits
+- **Missing pnl_pct field** in trade dictionary
 
 ## 📈 SUCCESS METRICS GOING FORWARD
-- [ ] Options P&L > $100/trade (realistic scaling)
-- [ ] Win rate > 30% (improved signal quality)  
-- [ ] Profit factor > 1.5 (stronger edge)
-- [ ] Max drawdown < 10% (good risk management)
+- [ ] Win rate > 60% on shares (current: 32%)
+- [ ] Consistent profitability on both SPY and QQQ
+- [ ] Options conversion showing realistic scaling
+- [ ] Stop loss consistency across all trades
 
 ## 🔄 LAST MAJOR UPDATE
-Testing realistic options scaling with $200 premium, 20% profit targets, 30% stop loss
+Implemented breakout strategy with 5-period dynamic support/resistance levels
+
