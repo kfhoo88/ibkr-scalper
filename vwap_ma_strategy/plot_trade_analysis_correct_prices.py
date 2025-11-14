@@ -1,323 +1,262 @@
 # vwap_ma_strategy/plot_trade_analysis_correct_prices.py
 """
-Corrected Trade Visualization - Show actual entry/exit prices and times
+Plot trade analysis with PERFECT timezone handling
+Consistent Eastern Time throughout the plotting pipeline
 """
 
 import pandas as pd
-import numpy as np
+import matplotlib.pyplot as plt
 import yaml
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import os
-import sys
-import random
+import pickle
+from datetime import datetime
+import pytz
+import numpy as np
 
-sys.path.append('..')
+def load_config():
+    """Load configuration file"""
+    with open('config/vwap_ma_config.yaml', 'r') as f:
+        return yaml.safe_load(f)
 
-class TradeVisualizerCorrected:
-    def __init__(self, config):
-        self.config = config['reversal_strategy']
-        self.ema_length = self.config['ema_length']
-        self.hl_backcandles = self.config['hl_backcandles']
+def load_data_with_timezone(symbol):
+    """Load price data with proper timezone handling - matches backtest exactly"""
+    filename = f"../data/historical/{symbol}_IBKR_1min_1year_20251110.csv"
+    df = pd.read_csv(filename)
     
-    def load_trade_data(self, symbol):
-        """Load saved trade data and handle mixed timezones"""
-        filename = f'trade_data_{symbol}.pkl'
+    # Use the EXACT same timezone conversion as backtest
+    df['datetime_et'] = pd.to_datetime(df['date'], utc=True).dt.tz_convert('US/Eastern')
+    df = df.set_index('datetime_et')
+    
+    column_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+    df = df.rename(columns=column_map)[['Open', 'High', 'Low', 'Close', 'Volume']]
+    
+    print(f"✅ Loaded {symbol} data: {df.index[0]} to {df.index[-1]}")
+    return df
+
+def ensure_eastern_time(timestamp, est):
+    """Ensure timestamp is in Eastern Time"""
+    if pd.isna(timestamp):
+        return None
+    if isinstance(timestamp, str):
+        timestamp = pd.to_datetime(timestamp)
+    if timestamp.tzinfo is None:
+        return est.localize(timestamp)
+    return timestamp.tz_convert('US/Eastern')
+
+def convert_trade_data(trades):
+    """Convert trade data to consistent format - handle both DataFrame and list"""
+    if isinstance(trades, pd.DataFrame):
+        print(f"📊 Converting DataFrame with {len(trades)} rows to list of trades")
+        trades_list = []
+        for _, row in trades.iterrows():
+            trade_dict = {
+                'entry_time': row['entry_time'],
+                'exit_time': row['exit_time'],
+                'entry_price': row['entry_price'],
+                'exit_price': row['exit_price'],
+                'pnl': row['pnl'],
+                'type': row['type'],
+                'exit_reason': row.get('exit_reason', 'UNKNOWN'),
+                'duration_minutes': row.get('duration_minutes', 0),
+                'duration_bars': row.get('duration_bars', 0)
+            }
+            trades_list.append(trade_dict)
+        return trades_list
+    elif isinstance(trades, list):
+        print(f"📊 Using existing list with {len(trades)} trades")
+        return trades
+    else:
+        print(f"❓ Unknown trade data type: {type(trades)}")
+        return []
+
+def plot_individual_trades(trades, price_df, symbol, config, est):
+    """Plot individual trades with perfect timezone alignment"""
+    print(f"\n📊 Plotting individual {symbol} trades...")
+    
+    # Convert trade data to consistent format
+    trades = convert_trade_data(trades)
+    
+    if not trades:
+        print(f"❌ No valid trades to plot for {symbol}")
+        return
+    
+    for i, trade in enumerate(trades[:10]):  # Plot first 10 trades
         try:
-            trades_df = pd.read_pickle(filename)
-            print(f"✅ Loaded {len(trades_df)} {symbol} trades")
+            plt.figure(figsize=(15, 10))
             
-            # Convert to UTC first, then remove timezone
-            trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'], utc=True).dt.tz_localize(None)
-            trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'], utc=True).dt.tz_localize(None)
+            # CRITICAL: Ensure trade timestamps are Eastern Time
+            entry_time = ensure_eastern_time(trade['entry_time'], est)
+            exit_time = ensure_eastern_time(trade['exit_time'], est)
             
-            return trades_df
+            if entry_time is None or exit_time is None:
+                print(f"❌ Invalid timestamps for trade {i+1}")
+                continue
+            
+            print(f"Trade {i+1}: {entry_time.strftime('%Y-%m-%d %H:%M:%S %Z')} to {exit_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            
+            # Get trade window (1 hour before entry to 1 hour after exit)
+            start_time = entry_time - pd.Timedelta(hours=1)
+            end_time = exit_time + pd.Timedelta(hours=1)
+            
+            trade_data = price_df.loc[start_time:end_time]
+            
+            if len(trade_data) == 0:
+                print(f"❌ No price data found for trade {i+1}")
+                continue
+            
+            # Create subplots
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), 
+                                          gridspec_kw={'height_ratios': [3, 1]})
+            
+            # Plot price data
+            ax1.plot(trade_data.index, trade_data['Close'], 
+                    label='Price', color='blue', linewidth=2, alpha=0.8)
+            
+            # Mark entry and exit points
+            ax1.axvline(x=entry_time, color='green', linestyle='--', linewidth=3, 
+                       label=f'Entry: {entry_time.strftime("%H:%M:%S ET")}')
+            ax1.axvline(x=exit_time, color='red', linestyle='--', linewidth=3, 
+                       label=f'Exit: {exit_time.strftime("%H:%M:%S ET")}')
+            
+            # Mark entry and exit prices
+            ax1.plot(entry_time, trade['entry_price'], 'g^', markersize=12, 
+                    label=f'Entry: ${trade["entry_price"]:.2f}')
+            ax1.plot(exit_time, trade['exit_price'], 'rv', markersize=12, 
+                    label=f'Exit: ${trade["exit_price"]:.2f}')
+            
+            # Add price range
+            price_range = trade_data['High'].max() - trade_data['Low'].min()
+            ax1.set_ylim([trade_data['Low'].min() - price_range * 0.1, 
+                         trade_data['High'].max() + price_range * 0.1])
+            
+            # Trade info box
+            pnl_color = 'green' if trade['pnl'] > 0 else 'red'
+            trade_info = f"{trade['type']} | P&L: ${trade['pnl']:+.2f} | Duration: {trade.get('duration_minutes', 0):.1f}min"
+            
+            ax1.set_title(f"{symbol} Trade {i+1} - {trade_info}", 
+                         fontsize=16, fontweight='bold', pad=20)
+            ax1.set_ylabel('Price', fontsize=12)
+            ax1.legend(loc='upper left')
+            ax1.grid(True, alpha=0.3)
+            
+            # Plot volume
+            ax2.bar(trade_data.index, trade_data['Volume'], 
+                   color='orange', alpha=0.6, label='Volume')
+            ax2.set_ylabel('Volume', fontsize=12)
+            ax2.set_xlabel('Time (Eastern Time)', fontsize=12)
+            ax2.legend(loc='upper left')
+            ax2.grid(True, alpha=0.3)
+            
+            # Format x-axis to show Eastern Time properly
+            for ax in [ax1, ax2]:
+                ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%H:%M', tz=est))
+            
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(f'trade_analysis_{symbol}_{i+1}_timezone_perfect.png', 
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✅ Saved plot for {symbol} trade {i+1}")
+            
         except Exception as e:
-            print(f"❌ Error loading {symbol} trade data: {e}")
-            return None
-    
-    def load_price_data(self, symbol):
-        """Load historical price data with proper timezone handling"""
-        filename = f"../data/historical/{symbol}_IBKR_1min_1year_20251110.csv"
-        try:
-            df = pd.read_csv(filename)
-            df['date'] = pd.to_datetime(df['date'], utc=True).dt.tz_localize(None)
-            df = df.set_index('date')
-            column_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
-            return df.rename(columns=column_map)[['Open', 'High', 'Low', 'Close', 'Volume']]
-        except FileNotFoundError:
-            print(f"❌ Price data file not found: {filename}")
-            return None
-    
-    def calculate_indicators(self, df):
-        """Calculate EMA and swing points for plotting"""
-        df = df.copy()
-        df['EMA'] = df['Close'].ewm(span=self.ema_length, adjust=False).mean()
-        df['swing_low'] = df['Low'].rolling(window=self.hl_backcandles, center=False).min()
-        df['swing_high'] = df['High'].rolling(window=self.hl_backcandles, center=False).max()
-        return df
-    
-    def find_nearest_price_data(self, trade_time, price_df, window_hours=6):
-        """Find the actual price data around the trade time"""
-        start_time = trade_time - timedelta(hours=window_hours)
-        end_time = trade_time + timedelta(hours=window_hours)
-        
-        mask = (price_df.index >= start_time) & (price_df.index <= end_time)
-        plot_df = price_df[mask].copy()
-        
-        if len(plot_df) == 0:
-            time_diff = abs(price_df.index - trade_time)
-            closest_idx = time_diff.argmin()
-            closest_time = price_df.index[closest_idx]
-            start_time = closest_time - timedelta(hours=window_hours)
-            end_time = closest_time + timedelta(hours=window_hours)
-            mask = (price_df.index >= start_time) & (price_df.index <= end_time)
-            plot_df = price_df[mask].copy()
-        
-        return plot_df
-    
-    def plot_trade_corrected(self, trade, price_df, symbol, category, rank):
-        """Plot trade with CORRECT entry/exit prices and times"""
-        
-        entry_time = trade['entry_time']
-        exit_time = trade['exit_time']
-        entry_price = trade['entry_price']
-        exit_price = trade['exit_price']
-        
-        print(f"   Trade {rank}: Entry={entry_time} @ ${entry_price:.2f}, Exit={exit_time} @ ${exit_price:.2f}")
-        
-        # Find price data around the trade
-        plot_df = self.find_nearest_price_data(entry_time, price_df, window_hours=6)
-        
-        if len(plot_df) == 0:
-            return None
-        
-        # Calculate indicators
-        plot_df = self.calculate_indicators(plot_df)
-        
-        # Create subplots
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=(
-                f"{symbol} - {category} #{rank} | {trade['type']} | P&L: ${trade['pnl']:+.2f}",
-                "Volume"
-            ),
-            row_heights=[0.7, 0.3]
-        )
-        
-        # Add candlestick chart
-        fig.add_trace(
-            go.Candlestick(
-                x=plot_df.index,
-                open=plot_df['Open'],
-                high=plot_df['High'],
-                low=plot_df['Low'],
-                close=plot_df['Close'],
-                name='Price'
-            ),
-            row=1, col=1
-        )
-        
-        # Add EMA
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.index,
-                y=plot_df['EMA'],
-                line=dict(color='orange', width=2),
-                name=f'EMA {self.ema_length}'
-            ),
-            row=1, col=1
-        )
-        
-        # Add swing points
-        swing_lows = plot_df[plot_df['Low'] == plot_df['swing_low']]
-        swing_highs = plot_df[plot_df['High'] == plot_df['swing_high']]
-        
-        if len(swing_lows) > 0:
-            fig.add_trace(
-                go.Scatter(
-                    x=swing_lows.index,
-                    y=swing_lows['Low'],
-                    mode='markers',
-                    marker=dict(color='blue', size=8, symbol='triangle-up'),
-                    name='Swing Low'
-                ),
-                row=1, col=1
-            )
-        
-        if len(swing_highs) > 0:
-            fig.add_trace(
-                go.Scatter(
-                    x=swing_highs.index,
-                    y=swing_highs['High'],
-                    mode='markers',
-                    marker=dict(color='red', size=8, symbol='triangle-down'),
-                    name='Swing High'
-                ),
-                row=1, col=1
-            )
-        
-        # **FIXED: Use ACTUAL entry/exit prices and times from trade data**
-        fig.add_trace(
-            go.Scatter(
-                x=[entry_time],
-                y=[entry_price],  # Use actual entry price from trade
-                mode='markers',
-                marker=dict(color='green', size=15, symbol='star'),
-                name=f'Entry (${entry_price:.2f})'
-            ),
-            row=1, col=1
-        )
-        
-        fig.add_trace(
-            go.Scatter(
-                x=[exit_time],
-                y=[exit_price],  # Use actual exit price from trade
-                mode='markers',
-                marker=dict(color='red', size=15, symbol='x'),
-                name=f'Exit (${exit_price:.2f})'
-            ),
-            row=1, col=1
-        )
-        
-        # Add stop loss and take profit lines at ACTUAL levels
-        if 'sl_price' in trade and trade['sl_price'] > 0:
-            fig.add_hline(
-                y=trade['sl_price'],
-                line_dash="dash", line_color="red",
-                annotation_text=f"SL: ${trade['sl_price']:.2f}", 
-                annotation_position="bottom right",
-                row=1, col=1
-            )
-        
-        if 'tp_price' in trade and trade['tp_price'] > 0:
-            fig.add_hline(
-                y=trade['tp_price'],
-                line_dash="dash", line_color="green",
-                annotation_text=f"TP: ${trade['tp_price']:.2f}",
-                annotation_position="top right",
-                row=1, col=1
-            )
-        
-        # Add volume
-        fig.add_trace(
-            go.Bar(
-                x=plot_df.index,
-                y=plot_df['Volume'],
-                name='Volume',
-                marker_color='lightblue',
-                opacity=0.7
-            ),
-            row=2, col=1
-        )
-        
-        # Add weekend shading
-        weekend_periods = []
-        start_date = plot_df.index.min().date()
-        end_date = plot_df.index.max().date()
-        
-        current_date = start_date
-        while current_date <= end_date:
-            if current_date.weekday() >= 5:
-                weekend_start = datetime.combine(current_date, datetime.min.time())
-                weekend_end = datetime.combine(current_date, datetime.max.time())
-                weekend_periods.append((weekend_start, weekend_end))
-            current_date += timedelta(days=1)
-        
-        for weekend_start, weekend_end in weekend_periods:
-            fig.add_vrect(
-                x0=weekend_start, x1=weekend_end,
-                fillcolor="lightgray", opacity=0.3,
-                layer="below", line_width=0,
-                row=1, col=1
-            )
-        
-        # Update layout with CORRECT prices
-        duration_days = (exit_time - entry_time).total_seconds() / (24 * 3600)
-        held_over_weekend = " ⚠️ WEEKEND HOLD" if duration_days > 1 else ""
-        
-        price_move_pct = ((exit_price - entry_price) / entry_price * 100) if trade['type'] == 'LONG' else ((entry_price - exit_price) / entry_price * 100)
-        
-        fig.update_layout(
-            title=f"{symbol} {category} #{rank} | {trade['type']} | "
-                  f"P&L: ${trade['pnl']:+.2f} ({price_move_pct:+.2f}%)<br>"
-                  f"Entry: {entry_time.strftime('%Y-%m-%d %H:%M (%A)')} @ ${entry_price:.2f}<br>"
-                  f"Exit: {exit_time.strftime('%Y-%m-%d %H:%M (%A)')} @ ${exit_price:.2f}<br>"
-                  f"Duration: {duration_days:.2f} days{held_over_weekend} | "
-                  f"Exit Reason: {trade.get('exit_reason', 'N/A')}",
-            xaxis_rangeslider_visible=False,
-            height=800,
-            showlegend=True
-        )
-        
-        return fig
-    
-    def generate_corrected_charts(self, charts_per_category=5):
-        """Generate charts with CORRECT entry/exit prices"""
-        print("🎯 GENERATING CORRECTED TRADE CHARTS")
-        print("Using actual entry/exit prices from trade data")
-        print("=" * 60)
-        
-        # Create output directory
-        os.makedirs('corrected_charts', exist_ok=True)
-        
-        total_charts = 0
-        
-        for symbol in ['SPY', 'QQQ']:
-            print(f"\n📊 Processing {symbol}...")
-            
-            # Load trade data
-            trades_df = self.load_trade_data(symbol)
-            if trades_df is None:
-                continue
-            
-            # Load price data
-            price_df = self.load_price_data(symbol)
-            if price_df is None:
-                continue
-            
-            # Test with fewer charts first to verify
-            print(f"  📉 Creating {charts_per_category} worst loss charts...")
-            worst_losses = trades_df.nsmallest(charts_per_category, 'pnl')
-            for i, (idx, trade) in enumerate(worst_losses.iterrows()):
-                fig = self.plot_trade_corrected(trade, price_df, symbol, 'Worst_Loss', i+1)
-                if fig:
-                    filename = f"corrected_charts/{symbol}_Worst_Loss_{i+1:02d}_{trade['type']}_{trade['pnl']:.0f}.html"
-                    fig.write_html(filename)
-                    total_charts += 1
-                    print(f"    ✅ {filename}")
-            
-            print(f"  📈 Creating {charts_per_category} best win charts...")
-            best_wins = trades_df.nlargest(charts_per_category, 'pnl')
-            for i, (idx, trade) in enumerate(best_wins.iterrows()):
-                fig = self.plot_trade_corrected(trade, price_df, symbol, 'Best_Win', i+1)
-                if fig:
-                    filename = f"corrected_charts/{symbol}_Best_Win_{i+1:02d}_{trade['type']}_{trade['pnl']:.0f}.html"
-                    fig.write_html(filename)
-                    total_charts += 1
-                    print(f"    ✅ {filename}")
-        
-        print(f"\n🎉 CORRECTED CHARTS COMPLETED!")
-        print(f"📁 Location: 'corrected_charts' folder")
-        print(f"📊 Total: {total_charts} charts with correct prices")
-        print(f"🖱️  Open any .html file to verify entry/exit accuracy")
+            print(f"❌ Error plotting {symbol} trade {i+1}: {e}")
+            continue
 
-def run_corrected_visualization():
-    """Run the corrected visualization with proper prices"""
-    print("🎯 CORRECTED TRADE VISUALIZATION")
-    print("Using actual entry/exit prices instead of candle close prices")
+def create_performance_analysis(trades, symbol, est):
+    """Create comprehensive performance analysis"""
+    print(f"\n📈 Creating performance analysis for {symbol}...")
+    
+    # Convert to DataFrame if it's a list
+    if isinstance(trades, list):
+        trades_df = pd.DataFrame(trades)
+    else:
+        trades_df = trades
+    
+    # Ensure all timestamps are Eastern Time
+    trades_df['entry_time_et'] = trades_df['entry_time'].apply(
+        lambda x: ensure_eastern_time(x, est)
+    )
+    trades_df['exit_time_et'] = trades_df['exit_time'].apply(
+        lambda x: ensure_eastern_time(x, est)
+    )
+    
+    # Time-based analysis
+    trades_df['entry_hour'] = trades_df['entry_time_et'].dt.hour
+    trades_df['entry_minute'] = trades_df['entry_time_et'].dt.minute
+    trades_df['entry_day'] = trades_df['entry_time_et'].dt.day_name()
+    
+    # Performance metrics
+    total_trades = len(trades_df)
+    winning_trades = len(trades_df[trades_df['pnl'] > 0])
+    losing_trades = len(trades_df[trades_df['pnl'] < 0])
+    win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+    total_pnl = trades_df['pnl'].sum()
+    avg_pnl = trades_df['pnl'].mean()
+    avg_win = trades_df[trades_df['pnl'] > 0]['pnl'].mean() if winning_trades > 0 else 0
+    avg_loss = trades_df[trades_df['pnl'] < 0]['pnl'].mean() if losing_trades > 0 else 0
+    
+    print(f"\n🎯 {symbol} PERFORMANCE SUMMARY (Eastern Time):")
+    print(f"   Total Trades: {total_trades}")
+    print(f"   Win Rate: {win_rate:.1f}%")
+    print(f"   Total P&L: ${total_pnl:+.2f}")
+    print(f"   Average P&L: ${avg_pnl:+.2f}")
+    print(f"   Average Win: ${avg_win:+.2f}")
+    print(f"   Average Loss: ${avg_loss:+.2f}")
+    
+    # Hourly performance
+    if total_trades > 0:
+        hourly_stats = trades_df.groupby('entry_hour').agg({
+            'pnl': ['count', 'sum', 'mean'],
+            'duration_minutes': 'mean'
+        }).round(2)
+        
+        print(f"\n⏰ HOURLY PERFORMANCE (Eastern Time):")
+        print(hourly_stats)
+    
+    # Save detailed analysis
+    trades_df.to_csv(f'trade_analysis_{symbol}_detailed.csv', index=False)
+    print(f"✅ Saved detailed analysis for {symbol}")
+    
+    return trades_df
+
+def plot_trade_analysis_correct_prices():
+    """Main function to plot trade analysis with perfect timezone handling"""
+    print("🎯 TRADE ANALYSIS - PERFECT TIMEZONE HANDLING")
+    print("Consistent Eastern Time throughout plotting pipeline")
     print("=" * 60)
     
-    # Load config
-    config_path = "config/vwap_ma_config.yaml"
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config()
+    est = pytz.timezone('US/Eastern')
     
-    visualizer = TradeVisualizerCorrected(config)
-    visualizer.generate_corrected_charts(charts_per_category=5)
+    # Load trade data
+    symbols = ['SPY', 'QQQ']
+    
+    for symbol in symbols:
+        try:
+            with open(f'trade_data_{symbol}_timezone_perfect.pkl', 'rb') as f:
+                trades = pickle.load(f)
+            print(f"✅ Loaded {len(trades)} {symbol} trades (type: {type(trades)})")
+            
+            # Load price data with correct timezone
+            price_df = load_data_with_timezone(symbol)
+            
+            # Plot individual trades
+            plot_individual_trades(trades, price_df, symbol, config, est)
+            
+            # Create performance analysis
+            create_performance_analysis(trades, symbol, est)
+            
+        except FileNotFoundError:
+            print(f"❌ {symbol} trade data not found - skipping")
+        except Exception as e:
+            print(f"❌ Error processing {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print(f"\n{'='*80}")
+    print("✅ TRADE ANALYSIS COMPLETED WITH PERFECT TIMEZONE HANDLING")
+    print("All timestamps are in Eastern Time and consistent with backtest results")
+    print(f"{'='*80}")
 
 if __name__ == "__main__":
-    run_corrected_visualization()
+    plot_trade_analysis_correct_prices()

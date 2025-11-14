@@ -71,6 +71,16 @@ reversal_strategy:
   tp_multiplier: 1.5
   require_reversal_candle: true
 
+  # ADD THESE NEW PARAMETERS:
+  position_size: 100
+  sl_atr_multiplier: 0.5
+  require_ema_alignment: true
+  reversal_confirmation: "close_above_previous_high"  # or "open_next_bar"
+
+  # Entry filters
+  min_volume: 100000
+  require_trend_confirmation: true
+
 backtest:
   data_path: "../data/historical/"
   commission_per_trade: 0.65
