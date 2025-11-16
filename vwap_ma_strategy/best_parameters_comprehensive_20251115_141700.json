@@ -1,0 +1,13 @@
+{
+  "best_params": {
+    "ema_length": 20,
+    "ema_backcandles": 7,
+    "hl_backcandles": 7,
+    "atr_multiplier": 1.0,
+    "tp_multiplier": 1.0
+  },
+  "best_win_rate": 53.77049180327869,
+  "best_profit_factor": 1.171965079887982,
+  "total_tests": 10,
+  "timestamp": "20251115_141700"
+}

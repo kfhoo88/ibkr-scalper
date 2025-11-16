@@ -1,0 +1,85 @@
+# vwap_ma_strategy/config/vwap_ma_config.yaml
+strategy:
+  name: "vwap_ma_scalping"
+  version: "1.1"  # Updated version
+  
+symbols:
+  primary: "SPY"
+  secondary: "QQQ"
+  enabled: ["SPY", "QQQ"]
+
+options:
+  trade_underlying: true      
+  contract_size: 100          # FIX: Trade 100 shares instead of 1
+  expiration: 1
+  delta_target: 0.40
+  max_premium: 200
+  contracts_per_trade: 1     # Realistic: 1 contract per trade
+
+indicators:
+  ma_fast: 9
+  ma_slow: 21
+  vwap_period: "daily"
+  atr_period: 14
+  volume_period: 20
+
+entry_rules:
+  require_pullback: false
+  pullback_min_candles: 1
+  confirmation_candle: true
+  min_volume_ratio: 1.5
+
+exit_rules:
+  #profit_target_pct: 0.6      # 0.6% share move = ~30% options (0.4 delta * 25x)
+  #stop_loss_pct: 0.9        # 0.9% share move = ~45% options (wider stop)
+  hedge_trigger: 20         # ADD THIS MISSING KEY
+  hedge_cost_ratio: 0.25
+  market_close_exit: true
+  exit_before_minutes: 60
+  max_hold_bars: 15         # Slightly longer to allow for reversals
+
+position_management:
+  max_trades_per_day: 5
+  max_position_size: 1
+  allow_multiple_positions: false
+
+risk_management:
+  max_loss_per_trade: 100
+  max_daily_loss: 500
+  max_drawdown: 1000
+
+trading_hours:
+  morning_start: "09:35"  
+  morning_end: "16:00"    
+  afternoon_start: "09:35" 
+  afternoon_end: "16:00"
+  avoid_first_minutes: 5
+  avoid_last_minutes: 30
+
+market_filters:
+  min_atr_percentage: 0.002
+  min_volume_ratio: 1.0
+  max_bid_ask_spread: 0.5
+  vix_max: 25
+
+reversal_strategy:
+ 
+
+  # ADD THESE NEW PARAMETERS:
+  position_size: 100
+  sl_atr_multiplier: 0.5
+  require_ema_alignment: true
+  reversal_confirmation: "close_above_previous_high"  # or "open_next_bar"
+
+  # Entry filters
+  min_volume: 100000
+  require_trend_confirmation: true
+
+backtest:
+  data_path: "../data/historical/"
+  commission_per_trade: 0.65
+  slippage_per_trade: 0.01
+
+logging:
+  level: "INFO"
+  save_signals: true
