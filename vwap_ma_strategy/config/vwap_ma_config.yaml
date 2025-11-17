@@ -63,12 +63,12 @@ market_filters:
   vix_max: 25
 
 reversal_strategy:
-  ema_length: 50
-  ema_backcandles: 14
-  hl_backcandles: 14
+  ema_length: 30 #50
+  ema_backcandles: 21 #14
+  hl_backcandles: 7 #14
   atr_multiplier: 1.0
   atr_period: 14
-  tp_multiplier: 1.5
+  tp_multiplier: 1 #1.5
   require_reversal_candle: true
 
   # ADD THESE NEW PARAMETERS:

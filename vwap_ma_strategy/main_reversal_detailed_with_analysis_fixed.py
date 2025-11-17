@@ -12,27 +12,8 @@ import yaml
 from datetime import datetime, timedelta
 import pytz
 import pickle
-import argparse
 
 sys.path.append('..')
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(description='QQQ/SPY Reversal Strategy Backtest')
-    parser.add_argument('--config', type=str, default='config/vwap_ma_config.yaml', 
-                       help='Path to config file (default: config/vwap_ma_config.yaml)')
-    parser.add_argument('--no-plot', action='store_true', 
-                       help='Skip plotting for faster execution')
-    parser.add_argument('--symbols', type=str, nargs='+', default=['SPY', 'QQQ'],
-                       help='Symbols to analyze (default: SPY QQQ)')
-    return parser.parse_args()
-
-def load_config(config_path):
-    """Load configuration from YAML file"""
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
 
 class ReversalStrategyDetailedFixed:
     def __init__(self, config):
@@ -189,6 +170,7 @@ class ReversalStrategyDetailedFixed:
                 prev_swing == 2 and 
                 df['Close'].iloc[i] > df['Open'].iloc[i] and 
                 df['Close'].iloc[i] > df['High'].iloc[i-1]):
+                # REMOVED: current_price > current_ema_value
                 
                 entry_price = df['Open'].iloc[i+1] if i+1 < len(df) else df['Close'].iloc[i]
                 swing_low_price = df['Low'].iloc[i-1]
@@ -203,6 +185,7 @@ class ReversalStrategyDetailedFixed:
                   prev_swing == 1 and
                   df['Close'].iloc[i] < df['Open'].iloc[i] and
                   df['Close'].iloc[i] < df['Low'].iloc[i-1]):
+                # REMOVED: current_price < current_ema_value
                 
                 entry_price = df['Open'].iloc[i+1] if i+1 < len(df) else df['Close'].iloc[i]
                 swing_high_price = df['High'].iloc[i-1]
@@ -273,38 +256,21 @@ class ReversalStrategyDetailedFixed:
         
         print(f"✅ Saved {len(trades_df)} {symbol} trades to trade_data_{symbol}.pkl")
 
-    def run_analysis(self, symbols=None):
-        """Main analysis method that uses command line arguments"""
-        if symbols is None:
-            symbols = ['SPY', 'QQQ']
-            
-        all_trades = []
-        
-        for symbol in symbols:
-            print(f"\n📊 Analyzing {symbol}...")
-            
-            # Load data
-            df = self.load_data_proper(symbol)
-            
-            # Run backtest
-            trades_df, total_pnl = self.backtest_complete(df, symbol)
-            
-            if not trades_df.empty:
-                all_trades.append(trades_df)
-        
-        # Combine and save all trades
-        if all_trades:
-            combined_trades = pd.concat(all_trades, ignore_index=True)
-            with open('trade_data_ALL.pkl', 'wb') as f:
-                pickle.dump(combined_trades, f)
-            print(f"\n✅ Saved combined trade data: {len(combined_trades)} trades")
-            
-        return all_trades
-
-    def backtest_complete(self, df, symbol):
-        """Complete backtest for one symbol"""
+def run_complete_analysis_fixed():
+    """Run complete analysis with ORIGINAL profitable logic + enhanced analysis"""
+    print("🎯 DETAILED TRADE ANALYSIS - FIXED VERSION")
+    print("Original profitable logic + Enhanced analysis features")
+    print("=" * 60)
+    
+    config_path = "config/vwap_ma_config.yaml"
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    strategy = ReversalStrategyDetailedFixed(config)
+    
+    def backtest_complete(df, symbol):
         print(f"\n📊 BACKTESTING {symbol}...")
-        df = self.generate_signals(df)
+        df = strategy.generate_signals(df)
         # FIX: Carry forward SL/TP values to entry bars
         df['SL'] = df['SL'].replace(0, np.nan).ffill()
         df['TP'] = df['TP'].replace(0, np.nan).ffill()
@@ -326,9 +292,9 @@ class ReversalStrategyDetailedFixed:
             current_price = row['Close']
             current_bar = i
             
-            # Check force exit conditions
+            # Check force exit conditions - SAME AS ORIGINAL
             if position != 0:
-                should_exit, exit_reason = self.should_force_exit(
+                should_exit, exit_reason = strategy.should_force_exit(
                     current_time, entry_time, current_bar - entry_bar
                 )
                 if should_exit:
@@ -353,8 +319,11 @@ class ReversalStrategyDetailedFixed:
                     entry_time = None
                     entry_bar = 0
 
-            # Check normal exit conditions
+                            
+            # Check normal exit conditions - SAME AS ORIGINAL
             if position > 0 and (current_price <= row['SL'] or current_price >= row['TP']):
+                print(f"EXIT LONG: {idx} | Entry: {entry_price:.2f} | Current: {current_price:.2f} | "
+          f"SL: {row['SL']:.2f} | TP: {row['TP']:.2f} | Reason: {'SL' if current_price <= row['SL'] else 'TP'}")
                 pnl = (current_price - entry_price) * position
                 capital += pnl
                 trades.append({
@@ -389,12 +358,17 @@ class ReversalStrategyDetailedFixed:
                 entry_time = None
                 entry_bar = 0
             
-            # Enter new positions
-            if position == 0 and row['FinalSignal'] != 0 and self.is_valid_trading_time(current_time):
-                position = self.position_size if row['FinalSignal'] == 2 else -self.position_size
+            # Enter new positions - USE CONFIGURABLE POSITION SIZE
+            if position == 0 and row['FinalSignal'] != 0 and strategy.is_valid_trading_time(current_time):
+                position = strategy.position_size if row['FinalSignal'] == 2 else -strategy.position_size
                 entry_price = row['Entry_Price']
                 entry_time = idx
                 entry_bar = current_bar
+
+               # DEBUG: Print entry details
+                print(f"ENTRY: {idx} | Type: {'LONG' if position > 0 else 'SHORT'} | "
+                      f"Price: {entry_price:.2f} | SL: {row['SL']:.2f} | TP: {row['TP']:.2f} | "
+                      f"Current: {current_price:.2f}") 
         
         if trades:
             trades_df = pd.DataFrame(trades)
@@ -404,35 +378,45 @@ class ReversalStrategyDetailedFixed:
             print(f"📈 {symbol} SUMMARY:")
             print(f"   Trades: {len(trades_df)}, Win Rate: {win_rate:.1f}%, P&L: ${total_pnl:+.2f}")
             
-            # ENHANCED ANALYSIS
-            self.analyze_losing_trades(trades_df, symbol)
+            # ENHANCED ANALYSIS - Your preferred format
+            strategy.analyze_losing_trades(trades_df, symbol)
             
             # SAVE DATA for visualization
-            self.save_trade_analysis(trades_df, symbol)
+            strategy.save_trade_analysis(trades_df, symbol)
             
             return trades_df, total_pnl
         return pd.DataFrame(), 0
+    
+    # Run analysis
+    spy_data = strategy.load_data_proper('SPY')
+    qqq_data = strategy.load_data_proper('QQQ')
+    
+    spy_trades, spy_pnl = backtest_complete(spy_data, 'SPY')
+    qqq_trades, qqq_pnl = backtest_complete(qqq_data, 'QQQ')
+    
+    # Save combined data
+    if not spy_trades.empty and not qqq_trades.empty:
+        all_trades = pd.concat([spy_trades, qqq_trades], ignore_index=True)
+        with open('trade_data_ALL.pkl', 'wb') as f:
+            pickle.dump(all_trades, f)
+        print(f"\n✅ Saved combined trade data: {len(all_trades)} trades")
+    
+    print(f"\n{'='*80}")
+    print("🎯 FINAL STRATEGY SUMMARY")
+    print(f"{'='*80}")
+    print(f"TOTAL P&L: ${spy_pnl + qqq_pnl:+.2f}")
+    print(f"SPY: ${spy_pnl:+.2f}, QQQ: ${qqq_pnl:+.2f}")
+    
+    print(f"\n{'='*80}")
+    print("🎯 TRADE DATA SAVED - READY FOR VISUALIZATION")
+    print(f"{'='*80}")
+    print("Files created:")
+    if not spy_trades.empty:
+        print(f"  - trade_data_SPY.pkl ({len(spy_trades)} trades)")
+    if not qqq_trades.empty:
+        print(f"  - trade_data_QQQ.pkl ({len(qqq_trades)} trades)")
+    if not spy_trades.empty and not qqq_trades.empty:
+        print(f"  - trade_data_ALL.pkl ({len(spy_trades) + len(qqq_trades)} total trades)")
 
 if __name__ == "__main__":
-    # Parse command line arguments
-    args = parse_arguments()
-    
-    try:
-        # Load configuration
-        config = load_config(args.config)
-        
-        # Create analyzer instance
-        analyzer = ReversalStrategyDetailedFixed(config)
-        
-        print(f"🎯 Running analysis with config: {args.config}")
-        print(f"📊 Symbols: {args.symbols}")
-        
-        # Run analysis
-        results = analyzer.run_analysis(symbols=args.symbols)
-        
-        print("✅ Analysis completed successfully!")
-        
-    except Exception as e:
-        print(f"❌ Error in main execution: {e}")
-        import traceback
-        traceback.print_exc()
+    run_complete_analysis_fixed()

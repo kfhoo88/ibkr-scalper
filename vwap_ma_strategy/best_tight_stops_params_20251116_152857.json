@@ -1,0 +1,13 @@
+{
+  "best_params": {
+    "ema_length": 20,
+    "ema_backcandles": 21,
+    "hl_backcandles": 14,
+    "sl_tick_distance": 0.02,
+    "tp_multiplier": 1.5
+  },
+  "best_win_rate": 100.0,
+  "best_profit_factor": Infinity,
+  "total_tests": 32,
+  "timestamp": "20251116_152857"
+}
